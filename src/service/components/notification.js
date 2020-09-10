@@ -246,9 +246,17 @@ const Listener = GObject.registerClass({
 
             // libnotify
             } else if (name === 'Notify') {
+                let sender = invocation.get_sender();
+
+                // Ignore notifications sent from org.freedesktop.Notifications
+                // It is a proxy used for sandboxing purposes, so all the
+                // notifications it sends are duplicates of the ones it receives.
+                if (sender === this._notificationsSender) {
+                    return;
+                }
+
                 // Try to brute-force an application name using DBus
                 if (!this.applications.hasOwnProperty(parameters[0])) {
-                    let sender = invocation.get_sender();
                     parameters[0] = await this._getAppName(sender, parameters[0]);
                 }
 
@@ -257,6 +265,25 @@ const Listener = GObject.registerClass({
         } catch (e) {
             debug(e);
         }
+    }
+
+    _monitorNameChanges() {
+        // Keep track of who owns org.freedesktop.Notifications, because we
+        // need to ignore notifications sent from it (they are duplicates).
+        this._session.signal_subscribe(
+            null,
+            'org.freedesktop.DBus',
+            'NameOwnerChanged',
+            '/org/freedesktop/DBus',
+            'org.freedesktop.Notifications',
+            Gio.DBusSignalFlags.MATCH_ARG0_NAMESPACE,
+            this._onNameOwnerChanged.bind(this)
+        );
+    }
+
+    _onNameOwnerChanged (connection, sender, path, iface, signal, params) {
+        let [name, oldOwner, newOwner] = params.full_unpack();
+        this._notificationsSender = newOwner;
     }
 
     /**
@@ -319,6 +346,8 @@ const Listener = GObject.registerClass({
             this._session = await DBus.getConnection();
             this._monitor = await DBus.newConnection();
             await this._monitorConnection();
+            this._monitorNameChanges();
+            this._notificationsSender = await this._getNameOwner('org.freedesktop.Notifications');
         } catch (e) {
             // FIXME: if something goes wrong the component will appear active
             logError(e);
